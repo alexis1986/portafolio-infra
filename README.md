@@ -139,6 +139,38 @@ El tamaño por defecto `s-1vcpu-1gb` tiene costo mensual/hora en DigitalOcean. R
 - Error de autenticación del proveedor:
   - Verifica `do_token` y que tenga permisos para gestionar Droplets.
 
+## GitHub Actions CI/CD
+
+Este repositorio incluye workflows automatizados de GitHub Actions para gestionar la infraestructura:
+
+### Workflows disponibles
+
+1. **Terraform Plan** (`.github/workflows/terraform-plan.yml`)
+   - Se ejecuta automáticamente en Pull Requests hacia `main`
+   - Valida y genera un plan de los cambios
+   - Comenta el plan directamente en el PR
+
+2. **Terraform Apply** (`.github/workflows/terraform-apply.yml`)
+   - Se ejecuta al hacer merge a `main`
+   - Requiere aprobación manual (environment: production)
+   - Aplica los cambios a la infraestructura
+
+### Configuración inicial
+
+Para usar GitHub Actions, sigue la guía completa en [GITHUB_SETUP.md](./GITHUB_SETUP.md).
+
+**Resumen:**
+1. Configurar secrets en GitHub (DO_TOKEN, SSH_KEY_ID, SPACES_ACCESS_KEY_ID, SPACES_SECRET_ACCESS_KEY)
+2. Configurar environment de producción con reviewers
+3. Migrar el state local al backend de Spaces: `terraform init -migrate-state`
+
+### Backend remoto
+
+El state de Terraform se almacena en DigitalOcean Spaces:
+- **Bucket:** `alexdevvv-portafolio-terraform-state`
+- **Region:** `nyc3`
+- **Endpoint:** `https://nyc3.digitaloceanspaces.com`
+
 ## Mantenimiento y limpieza
 
 - Para destruir la infraestructura creada por este módulo/proyecto:

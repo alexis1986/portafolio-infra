@@ -84,3 +84,7 @@ tests/
 local-*
 *-local.*
 .terraform.lock.hcl
+
+# GitHub Actions artifacts
+tfplan
+*.tfplan
