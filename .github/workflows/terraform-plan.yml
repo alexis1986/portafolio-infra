@@ -47,6 +47,10 @@ jobs:
         id: init
         run: terraform init
 
+      - name: Determine runner public IP
+        id: ip
+        run: echo "ip=$(curl -s https://ifconfig.me)" >> $GITHUB_OUTPUT
+
       - name: Terraform Validate
         id: validate
         run: terraform validate -no-color
@@ -56,11 +60,17 @@ jobs:
         run: |
           terraform plan -no-color -out=tfplan \
             -var="do_token=${{ secrets.DO_TOKEN }}" \
-            -var="ssh_key_id=${{ secrets.SSH_KEY_ID }}" \
             -var="region=${{ vars.TF_VAR_REGION || 'nyc3' }}" \
-            -var="droplet_size=${{ vars.TF_VAR_DROPLET_SIZE || 's-1vcpu-1gb' }}" \
-            -var="droplet_image=${{ vars.TF_VAR_DROPLET_IMAGE || 'ubuntu-24-04-x64' }}" \
-            -var="droplet_name=${{ vars.TF_VAR_DROPLET_NAME || 'portafolio-droplet' }}"
+            -var="cluster_name=${{ vars.TF_VAR_CLUSTER_NAME || 'portafolio-cluster' }}" \
+            -var="kubernetes_version=${{ vars.TF_VAR_KUBERNETES_VERSION || '' }}" \
+            -var="tags=${{ vars.TF_VAR_TAGS || '[\"portafolio\"]' }}" \
+            -var="vpc_name=${{ vars.TF_VAR_VPC_NAME || 'portafolio-vpc' }}" \
+            -var="vpc_cidr=${{ vars.TF_VAR_VPC_CIDR || '10.10.0.0/16' }}" \
+            -var="node_pool_name=${{ vars.TF_VAR_NODE_POOL_NAME || 'portafolio-pool' }}" \
+            -var="node_pool_size=${{ vars.TF_VAR_NODE_POOL_SIZE || 's-1vcpu-1gb' }}" \
+            -var="node_pool_min_nodes=${{ vars.TF_VAR_NODE_POOL_MIN_NODES || 1 }}" \
+            -var="node_pool_max_nodes=${{ vars.TF_VAR_NODE_POOL_MAX_NODES || 2 }}" \
+            -var="authorized_sources=[\"${{ steps.ip.outputs.ip }}/32\"]"
         continue-on-error: true
 
       - name: Comment PR with Plan

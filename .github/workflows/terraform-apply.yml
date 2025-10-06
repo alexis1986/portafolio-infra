@@ -46,6 +46,10 @@ jobs:
         id: init
         run: terraform init
 
+      - name: Determine runner public IP
+        id: ip
+        run: echo "ip=$(curl -s https://ifconfig.me)" >> $GITHUB_OUTPUT
+
       - name: Terraform Validate
         id: validate
         run: terraform validate -no-color
@@ -55,11 +59,17 @@ jobs:
         run: |
           terraform plan -no-color -out=tfplan \
             -var="do_token=${{ secrets.DO_TOKEN }}" \
-            -var="ssh_key_id=${{ secrets.SSH_KEY_ID }}" \
             -var="region=${{ vars.TF_VAR_REGION || 'nyc3' }}" \
-            -var="droplet_size=${{ vars.TF_VAR_DROPLET_SIZE || 's-1vcpu-1gb' }}" \
-            -var="droplet_image=${{ vars.TF_VAR_DROPLET_IMAGE || 'ubuntu-24-04-x64' }}" \
-            -var="droplet_name=${{ vars.TF_VAR_DROPLET_NAME || 'portafolio-droplet' }}"
+            -var="cluster_name=${{ vars.TF_VAR_CLUSTER_NAME || 'portafolio-cluster' }}" \
+            -var="kubernetes_version=${{ vars.TF_VAR_KUBERNETES_VERSION || '' }}" \
+            -var="tags=${{ vars.TF_VAR_TAGS || '[\"portafolio\"]' }}" \
+            -var="vpc_name=${{ vars.TF_VAR_VPC_NAME || 'portafolio-vpc' }}" \
+            -var="vpc_cidr=${{ vars.TF_VAR_VPC_CIDR || '10.10.0.0/16' }}" \
+            -var="node_pool_name=${{ vars.TF_VAR_NODE_POOL_NAME || 'portafolio-pool' }}" \
+            -var="node_pool_size=${{ vars.TF_VAR_NODE_POOL_SIZE || 's-1vcpu-1gb' }}" \
+            -var="node_pool_min_nodes=${{ vars.TF_VAR_NODE_POOL_MIN_NODES || 1 }}" \
+            -var="node_pool_max_nodes=${{ vars.TF_VAR_NODE_POOL_MAX_NODES || 2 }}" \
+            -var="authorized_sources=[\"${{ steps.ip.outputs.ip }}/32\"]"
 
       - name: Terraform Apply
         id: apply
@@ -68,6 +78,38 @@ jobs:
       - name: Terraform Output
         id: output
         run: terraform output -json
+
+      - name: Export kubeconfig file
+        run: |
+          terraform output -raw kubeconfig > kubeconfig
+          echo "KUBECONFIG_PATH=$PWD/kubeconfig" >> $GITHUB_ENV
+
+      - name: Upload kubeconfig artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: kubeconfig
+
+      - name: Addons - Terraform Init
+        id: addons_init
+        run: terraform init
+        working-directory: addons
+
+      - name: Addons - Terraform Plan
+        id: addons_plan
+        run: |
+          terraform plan -no-color -out=addons-tfplan \
+            -var="kubeconfig_file=${{ env.KUBECONFIG_PATH }}" \
+            -var="do_token=${{ secrets.DO_TOKEN }}" \
+            -var="domain_base=${{ vars.TF_VAR_DOMAIN_BASE || 'alexdevvv.com' }}" \
+            -var="letsencrypt_email=${{ vars.TF_VAR_LETSENCRYPT_EMAIL || 'alexis.castellano@gmail.com' }}" \
+            -var="letsencrypt_environment=${{ vars.TF_VAR_LETSENCRYPT_ENVIRONMENT || 'production' }}"
+        working-directory: addons
+
+      - name: Addons - Terraform Apply
+        id: addons_apply
+        run: terraform apply -auto-approve addons-tfplan
+        working-directory: addons
 
       - name: Comment with Apply Results
         uses: actions/github-script@v7

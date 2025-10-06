@@ -1,182 +1,113 @@
-# Infraestructura de Portafolio en DigitalOcean (Terraform)
+# Infraestructura de Portafolio en DigitalOcean (Terraform + DOKS)
 
-Infraestructura IaC para desplegar una Droplet de DigitalOcean destinada a hospedar un portafolio/proyecto personal. El aprovisionamiento se realiza con Terraform y un `cloud-init` que instala Docker y (opcionalmente) Docker Compose.
-
-Este repo crea:
-
-- Una `digitalocean_droplet` con etiqueta `portafolio` definida en `main.tf`.
-- Salida con la IP pública (`output.droplet_ip`).
-- Configuración de arranque `cloud-init.sh` que instala y habilita Docker.
+Infraestructura IaC para crear un clúster de Kubernetes en DigitalOcean (DOKS) con VPC dedicada, integración con DO Container Registry (opcional), y un flujo en dos pasos para instalar add-ons (Ingress NGINX, cert-manager, external-dns y Metrics Server) mediante Terraform y Helm.
 
 ## Arquitectura
 
-- Proveedor: `digitalocean/digitalocean` (~> 2.0) configurado en `provider.tf`.
-- Recurso principal: `digitalocean_droplet.portafolio` en `main.tf`.
-- User data: `cloud-init.sh` para preparar el host (Docker + utilidades).
+- Proveedor: `digitalocean/digitalocean` (~> 2.0) en `provider.tf`.
+- Red: `digitalocean_vpc.vpc` dedicada y parametrizable.
+- Registro: `digitalocean_container_registry.registry` (opcional) e integración `registry_integration` en el clúster.
+- Clúster: `digitalocean_kubernetes_cluster.cluster` con:
+  - Versión de Kubernetes variable; si está vacía se usa la última estable mediante `data.digitalocean_kubernetes_versions.this.latest_version`.
+  - `maintenance_policy` (domingo 03:00 UTC), `auto_upgrade` y `surge_upgrade` activados por defecto.
+  - Node pool con autoscaling (`min_nodes=1`, `max_nodes=2`) y tamaño `s-1vcpu-1gb` por defecto.
+  - Firewall del plano de control configurado con allowlist dinámico para GitHub Actions (`authorized_sources`).
+- Outputs principales: `cluster_id`, `cluster_endpoint`, `kubeconfig` (sensible), `vpc_id`, `registry_name`.
+- Add-ons (directorio `addons/`): instalados en un segundo paso usando el `kubeconfig` del clúster.
 
 ## Requisitos
 
 - Terraform >= 1.3.0.
-- Cuenta de DigitalOcean con un token API válido.
-- Una clave SSH pública cargada en DigitalOcean (necesitamos su `ID` o `fingerprint`).
-- Opcional: `doctl` (CLI de DigitalOcean) para gestionar claves y probar credenciales.
+- Cuenta de DigitalOcean y `DO_TOKEN` con permisos para Kubernetes, VPC, Registry y DNS (para external-dns).
+- Backend remoto configurado en `provider.tf` (DigitalOcean Spaces via backend S3).
 
 ## Variables principales (`variables.tf`)
 
-- `do_token` (string, sensible): Token API de DigitalOcean.
-- `ssh_key_id` (string): ID o fingerprint de la clave SSH subida a DigitalOcean.
-- `region` (string, default `nyc3`): Región de la Droplet.
-- `droplet_size` (string, default `s-1vcpu-1gb`): Tamaño de la Droplet.
-- `droplet_image` (string, default `ubuntu-24-04-x64`): Imagen base.
-- `droplet_name` (string, default `portafolio-droplet`): Nombre del recurso.
-
-## Salidas (`output.tf`)
-
-- `droplet_ip`: IPv4 pública de la Droplet provisionada.
+- `do_token` (sensible)
+- `region` (default `nyc3`)
+- `cluster_name` (default `portafolio-cluster`)
+- `kubernetes_version` (vacío => última estable)
+- `auto_upgrade` (default `true`), `surge_upgrade` (default `true`)
+- `maintenance_policy_day` (default `sunday`), `maintenance_policy_start_time` (default `03:00`)
+- `tags` (lista; default `["portafolio"]`)
+- `vpc_name` (default `portafolio-vpc`), `vpc_cidr` (default `10.10.0.0/16`)
+- `node_pool_name`, `node_pool_size`, `node_pool_min_nodes`, `node_pool_max_nodes`
+- `authorized_sources` (lista de CIDRs para el API server)
+- `enable_registry_integration` (default `true`), `registry_name` (default `portafolio-registry`), `registry_tier` (default `basic`)
 
 ## Estructura del proyecto
 
 ```
 .
-├── main.tf              # Recurso Droplet + user_data
-├── provider.tf          # Requerimientos y proveedor DO
-├── variables.tf         # Variables de entrada
-├── output.tf            # Outputs (IP pública)
-├── cloud-init.sh        # Script de bootstrap (instala Docker)
-├── .terraform.lock.hcl  # Lockfile de proveedores
-└── README.md            # Este archivo
+├── main.tf               # VPC, (opcional) Registry, DOKS cluster
+├── provider.tf           # Proveedor DO y backend (Spaces via S3)
+├── variables.tf          # Variables de entrada parametrizables
+├── output.tf             # Outputs (kubeconfig, ids, endpoint)
+├── addons/               # Segundo paso: add-ons
+│   ├── providers.tf      # Providers kubernetes y helm
+│   ├── variables.tf      # Vars de add-ons y credenciales
+│   └── main.tf           # Ingress, cert-manager (+ClusterIssuer), external-dns, metrics-server
+└── .github/workflows/    # Plan/Apply/Destroy con allowlist dinámico
 ```
 
-## Configuración de credenciales
-
-1) Crea un token en DigitalOcean (Control Panel → API → Tokens). Concede permisos de lectura/escritura para Droplets.
-2) Sube tu clave SSH pública a DigitalOcean (Control Panel → Settings → Security → Add SSH Key).
-3) Obtén el `ID` o `fingerprint` de la clave SSH. Ejemplos:
-
-```bash
-# Con doctl (opcional)
-doctl auth init
-doctl compute ssh-key list
-
-# Vía API (curl), sustituye $DO_TOKEN por tu token
-curl -s -H "Authorization: Bearer $DO_TOKEN" \
-  https://api.digitalocean.com/v2/account/keys | jq '.ssh_keys[] | {id, name, fingerprint}'
-```
-
-## Uso
-
-1) Crea un archivo `terraform.tfvars` con tus valores reales:
-
-```hcl
-do_token    = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-ssh_key_id  = "12345678"            # o el fingerprint: "aa:bb:cc:..."
-region      = "nyc3"                # opcional, por defecto nyc3
-droplet_size = "s-1vcpu-1gb"        # opcional
-droplet_image = "ubuntu-24-04-x64"  # opcional
-droplet_name  = "portafolio-droplet"# opcional
-```
-
-2) Inicializa y valida:
+## Uso local (opcional)
 
 ```bash
 terraform init
-terraform validate
+terraform plan -out tfplan \
+  -var "do_token=$DO_TOKEN" \
+  -var "region=nyc3"
+terraform apply tfplan
+
+# kubeconfig
+terraform output -raw kubeconfig > kubeconfig
+
+# Add-ons (segundo paso)
+cd addons
+terraform init
+terraform apply \
+  -var "kubeconfig_file=../kubeconfig" \
+  -var "do_token=$DO_TOKEN" \
+  -var "domain_base=alexdevvv.com" \
+  -var "letsencrypt_email=alexis.castellano@gmail.com" \
+  -var "letsencrypt_environment=production"
 ```
-
-3) Previsualiza cambios y aplica:
-
-```bash
-terraform plan -out plan.out
-terraform apply plan.out
-```
-
-4) Obtén la IP pública y conéctate por SSH:
-
-```bash
-terraform output droplet_ip
-ssh root@$(terraform output -raw droplet_ip)
-```
-
-Nota: El `cloud-init` tardará unos minutos en completar la instalación de Docker. Puedes ver el progreso en `/var/log/cloud-init-output.log` dentro de la Droplet.
-
-## ¿Qué hace `cloud-init.sh`?
-
-- Cambia mirrors de DO por los oficiales de Ubuntu (robustez).
-- Actualiza paquetes y habilita repos necesarios.
-- Instala Docker y habilita el servicio.
-- Intenta instalar el plugin `docker-compose-plugin`.
-- Si lo anterior falla, intenta la instalación desde el repo oficial de Docker.
-- Deja una marca `cloud-init-done.flag` al finalizar.
-
-Verificaciones rápidas después del login:
-
-```bash
-docker --version
-docker compose version   # puede ser opcional según disponibilidad
-```
-
-## Buenas prácticas y seguridad
-
-- No cometas `terraform.tfstate` ni archivos con secretos. Asegúrate de que `.gitignore` cubra `*.tfstate`, `*.tfvars` y similares.
-- Trata `do_token` como información sensible. Usa `terraform.tfvars` local o variables de entorno.
-- Considera un backend remoto (p. ej., Terraform Cloud) si vas a colaborar o requieres bloqueo de estado.
-
-## Costos
-
-El tamaño por defecto `s-1vcpu-1gb` tiene costo mensual/hora en DigitalOcean. Revisa la [tabla de precios de Droplets](https://www.digitalocean.com/pricing/droplets) y elimina el recurso cuando no lo uses para evitar cargos.
-
-## Solución de problemas
-
-- Docker no está disponible tras el arranque:
-  - Revisa `/var/log/cloud-init-output.log`.
-  - Ejecuta `systemctl status docker` y `journalctl -u docker`.
-  - Vuelve a intentar instalar Compose: `apt-get install -y docker-compose-plugin` o sigue la parte de “repo oficial” del script.
-
-- Error con `ssh_key_id`:
-  - Asegúrate de que corresponde al ID o fingerprint de la clave subida a DO.
-  - Lista claves: `doctl compute ssh-key list`.
-
-- Error de autenticación del proveedor:
-  - Verifica `do_token` y que tenga permisos para gestionar Droplets.
 
 ## GitHub Actions CI/CD
 
-Este repositorio incluye workflows automatizados de GitHub Actions para gestionar la infraestructura:
+Workflows en `.github/workflows/`:
 
-### Workflows disponibles
+- **Terraform Plan**: Formatea, init, validate y plan. Obtiene IP del runner y la inyecta en `authorized_sources`.
+- **Terraform Apply**: Init → plan → apply → exporta `kubeconfig` como artefacto → segundo paso aplica add-ons desde `addons/` con `kubeconfig`.
+- **Terraform Destroy**: Destruye add-ons (si hay `kubeconfig`) y luego el clúster.
 
-1. **Terraform Plan** (`.github/workflows/terraform-plan.yml`)
-   - Se ejecuta automáticamente en Pull Requests hacia `main`
-   - Valida y genera un plan de los cambios
-   - Comenta el plan directamente en el PR
+### Secrets y Variables
 
-2. **Terraform Apply** (`.github/workflows/terraform-apply.yml`)
-   - Se ejecuta al hacer merge a `main`
-   - Requiere aprobación manual (environment: production)
-   - Aplica los cambios a la infraestructura
+- Secrets requeridos: `DO_TOKEN`, `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY`.
+- Repository variables opcionales (para override de defaults):
+  - `TF_VAR_CLUSTER_NAME`, `TF_VAR_KUBERNETES_VERSION`, `TF_VAR_TAGS` (JSON)
+  - `TF_VAR_REGION`, `TF_VAR_VPC_NAME`, `TF_VAR_VPC_CIDR`
+  - `TF_VAR_NODE_POOL_NAME`, `TF_VAR_NODE_POOL_SIZE`, `TF_VAR_NODE_POOL_MIN_NODES`, `TF_VAR_NODE_POOL_MAX_NODES`
+  - `TF_VAR_DOMAIN_BASE`, `TF_VAR_LETSENCRYPT_EMAIL`, `TF_VAR_LETSENCRYPT_ENVIRONMENT`
 
-### Configuración inicial
+## Backend remoto
 
-Para usar GitHub Actions, sigue la guía completa en [GITHUB_SETUP.md](./GITHUB_SETUP.md).
+El state de Terraform se almacena en DigitalOcean Spaces (backend S3) definido en `provider.tf`:
+- Bucket: `alexdevvv-portafolio-terraform-state`
+- Key: `terraform.tfstate`
+- Endpoint: `https://nyc3.digitaloceanspaces.com`
 
-**Resumen:**
-1. Configurar secrets en GitHub (DO_TOKEN, SSH_KEY_ID, SPACES_ACCESS_KEY_ID, SPACES_SECRET_ACCESS_KEY)
-2. Configurar environment de producción con reviewers
-3. Migrar el state local al backend de Spaces: `terraform init -migrate-state`
+## Mantenimiento y costos
 
-### Backend remoto
+- Ventana de mantenimiento: domingo 03:00 UTC, con `auto_upgrade` y `surge_upgrade`.
+- Revisa precios de DOKS, VPC y Registry (si está habilitado) en la web de DigitalOcean.
 
-El state de Terraform se almacena en DigitalOcean Spaces:
-- **Bucket:** `alexdevvv-portafolio-terraform-state`
-- **Region:** `nyc3`
-- **Endpoint:** `https://nyc3.digitaloceanspaces.com`
+## Solución de problemas
 
-## Mantenimiento y limpieza
+- Error con versión de Kubernetes: deja `kubernetes_version` vacío para usar `latest_version` del data source.
+- Acceso al API: la allowlist usa la IP pública del runner; si necesitás acceso local, agrega tu IP a `authorized_sources`.
+- Add-ons: requieren que el clúster esté listo y que `kubeconfig` sea válido.
 
-- Para destruir la infraestructura creada por este módulo/proyecto:
+## Notas
 
-```bash
-terraform destroy
-```
-
-Esto eliminará la Droplet y recursos asociados creados por este stack.
+- El stack anterior basado en Droplet/`cloud-init.sh` fue reemplazado por DOKS. `cloud-init.sh` ya no se utiliza.
